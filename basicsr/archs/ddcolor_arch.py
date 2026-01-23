@@ -183,13 +183,38 @@ class Encoder(nn.Module):
         print('Loaded pretrained convnext model.')
 
     def load(self, path):
+        import os
+        from os import path as osp
         from basicsr.utils import get_root_logger
         logger = get_root_logger()
         if not path:
             logger.info("No checkpoint found. Initializing model from scratch")
             return
-        logger.info("[Encoder] Loading from {} ...".format(path))
-        checkpoint = torch.load(path, map_location=torch.device("cpu"))
+
+        # 允许从任意工作目录启动：优先按 DDColor 根目录解析相对路径
+        raw_path = osp.expanduser(path)
+        resolved_path = raw_path
+        if not osp.isabs(raw_path):
+            ddcolor_root = osp.abspath(osp.join(osp.dirname(__file__), osp.pardir, osp.pardir, osp.pardir))
+            rel = raw_path[2:] if raw_path.startswith('./') else raw_path
+            candidate = osp.join(ddcolor_root, rel)
+            if osp.isfile(candidate):
+                resolved_path = candidate
+            elif osp.isfile(raw_path):
+                resolved_path = osp.abspath(raw_path)
+            else:
+                raise FileNotFoundError(
+                    f"找不到预训练权重: {raw_path}\n"
+                    f"已尝试: {candidate}\n"
+                    f"当前工作目录: {os.getcwd()}"
+                )
+
+        if resolved_path != raw_path:
+            logger.info(f"[Encoder] Loading from {raw_path} -> {resolved_path} ...")
+        else:
+            logger.info("[Encoder] Loading from {} ...".format(resolved_path))
+
+        checkpoint = torch.load(resolved_path, map_location=torch.device("cpu"))
         checkpoint_state_dict = checkpoint['model'] if 'model' in checkpoint.keys() else checkpoint
         incompatible = self.arch.load_state_dict(checkpoint_state_dict, strict=False)
 

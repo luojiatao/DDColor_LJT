@@ -5,8 +5,6 @@ from setuptools import find_packages, setup
 import os
 import subprocess
 import time
-import torch
-from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
 
 VERSION = '1.3.4.6'
 version_file = 'basicsr/version.py'
@@ -81,6 +79,15 @@ def get_version():
 
 
 def make_cuda_ext(name, module, sources, sources_cuda=None):
+    try:
+        import torch
+        from torch.utils.cpp_extension import CppExtension, CUDAExtension
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "Building CUDA/C++ extensions requires 'torch' to be installed in the current Python environment. "
+            "Install PyTorch first, or set BASICSR_EXT=False to skip compiling extensions."
+        ) from e
+
     if sources_cuda is None:
         sources_cuda = []
     define_macros = []
@@ -116,6 +123,7 @@ def get_requirements(filename='requirements.txt'):
 if __name__ == '__main__':
     cuda_ext = os.getenv('BASICSR_EXT')  # whether compile cuda ext
     if cuda_ext == 'True':
+        from torch.utils.cpp_extension import BuildExtension
         ext_modules = [
             make_cuda_ext(
                 name='deform_conv_ext',
@@ -135,6 +143,10 @@ if __name__ == '__main__':
         ]
     else:
         ext_modules = []
+
+    cmdclass = {}
+    if cuda_ext == 'True':
+        cmdclass = {'build_ext': BuildExtension}
 
     write_version_py()
     setup(
@@ -161,5 +173,5 @@ if __name__ == '__main__':
         setup_requires=['cython', 'numpy'],
         install_requires=get_requirements(),
         ext_modules=ext_modules,
-        cmdclass={'build_ext': BuildExtension},
+        cmdclass=cmdclass,
         zip_safe=False)

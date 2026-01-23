@@ -11,6 +11,17 @@ VGG_PRETRAIN_PATH = {
     'vgg16_bn': './pretrain/vgg16_bn-6c64b313.pth'
 }
 
+
+def _resolve_ddcolor_path(path: str) -> str:
+    """把相对路径解析到DDColor根目录下，避免依赖启动时工作目录。"""
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    ddcolor_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir))
+    rel = path[2:] if path.startswith('./') else path
+    candidate = os.path.join(ddcolor_root, rel)
+    return candidate if os.path.exists(candidate) else path
+
 NAMES = {
     'vgg11': [
         'conv1_1', 'relu1_1', 'pool1', 'conv2_1', 'relu2_1', 'pool2', 'conv3_1', 'relu3_1', 'conv3_2', 'relu3_2',
@@ -104,9 +115,10 @@ class VGGFeatureExtractor(nn.Module):
             if idx > max_idx:
                 max_idx = idx
 
-        if os.path.exists(VGG_PRETRAIN_PATH[vgg_type]):
+        pretrain_path = _resolve_ddcolor_path(VGG_PRETRAIN_PATH[vgg_type])
+        if os.path.exists(pretrain_path):
             vgg_net = getattr(vgg, vgg_type)(pretrained=False)
-            state_dict = torch.load(VGG_PRETRAIN_PATH[vgg_type], map_location=lambda storage, loc: storage)
+            state_dict = torch.load(pretrain_path, map_location=lambda storage, loc: storage)
             vgg_net.load_state_dict(state_dict)
         else:
             vgg_net = getattr(vgg, vgg_type)(pretrained=True)

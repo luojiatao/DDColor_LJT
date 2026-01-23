@@ -1,0 +1,128 @@
+# 方案1：单编码器 early-fusion + refine 只拼B（基线）
+# 用法：python basicsr/train.py -opt options/train/ljt_train_detail_refine_earlyfusion.yml
+
+name: detail_refine_earlyfusion
+model_type: DetailRefineModel
+scale: 1
+num_gpu: auto
+manual_seed: 0
+
+# datasets
+# 你需要先准备一个 meta 文件，每行三列：
+#   path_to_B  path_to_A  path_to_C
+# 其中：B=无褶皱但模糊（结构图），A=有褶皱清晰（参考图），C=无褶皱清晰（GT）
+
+datasets:
+  train:
+    name: TripletTrain
+    type: TripletRefineDataset
+    meta_info_file: ["data_list/ljt_detail_refine_train.txt"]
+    gt_size: 512
+    use_hflip: True
+    use_rot: False
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 2
+    pin_memory: True
+    persistent_workers: True
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: TripletVal
+    type: TripletRefineDataset
+    meta_info_file: "data_list/ljt_detail_refine_val.txt"
+    gt_size: ~
+
+# network
+network_g:
+  type: DetailRefineEarlyFusion
+  encoder_name: convnext-l
+  num_queries: 256
+  num_scales: 3
+  dec_layers: 9
+  nf: 512
+  out_channels: 3
+  last_norm: Spectral
+  encoder_from_pretrain: True
+  input_size: [512, 512]
+  do_imagenet_normalize: True
+
+# 可选：GAN（默认关闭）
+# network_d:
+#   type: DynamicUNetDiscriminator
+#   nf: 64
+#   n_channels: 3
+
+# path
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# training
+train:
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.99]
+
+  # optim_d:  # 若开启 network_d/gan_opt 才需要
+  #   type: Adam
+  #   lr: !!float 1e-4
+  #   weight_decay: 0
+  #   betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [25000, 40000]
+    gamma: 0.5
+
+  total_iter: 50000
+  warmup_iter: -1
+
+  # 基础损失：像素 + 感知（建议至少开感知）
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+  perceptual_opt:
+    type: PerceptualLoss
+    layer_weights:
+      'conv1_2': 0.1
+      'conv2_2': 0.1
+      'conv3_4': 1.0
+      'conv4_4': 1.0
+      'conv5_4': 1.0
+    vgg_type: vgg19
+    use_input_norm: true
+    range_norm: false
+    perceptual_weight: 1.0
+    style_weight: 0
+
+  # gan_opt: ~
+
+# validation
+val:
+  val_freq: 5000
+  save_img: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# logger
+logger:
+  print_freq: 100
+  save_snapshot_freq: ~
+  save_checkpoint_freq: 5000
+  use_tb_logger: true
+
+# misc
+dist_params:
+  backend: nccl
+  port: 29500

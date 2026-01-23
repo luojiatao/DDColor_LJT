@@ -343,7 +343,27 @@ class ColorModel(BaseModel):
                 tb_logger.add_scalar(f'metrics/{dataset_name}/{metric}', value, current_iter)
 
     def _prepare_inception_model_fid(self, path='pretrain/inception_v3_google-1a9a5a14.pth'):
-        incep_state_dict = torch.load(path, map_location='cpu')
+        import os
+        from os import path as osp
+
+        raw_path = osp.expanduser(path)
+        resolved_path = raw_path
+        if not osp.isabs(raw_path):
+            ddcolor_root = osp.abspath(osp.join(osp.dirname(__file__), osp.pardir, osp.pardir, osp.pardir))
+            rel = raw_path[2:] if raw_path.startswith('./') else raw_path
+            candidate = osp.join(ddcolor_root, rel)
+            if osp.isfile(candidate):
+                resolved_path = candidate
+            elif osp.isfile(raw_path):
+                resolved_path = osp.abspath(raw_path)
+            else:
+                raise FileNotFoundError(
+                    f"找不到 InceptionV3 权重: {raw_path}\n"
+                    f"已尝试: {candidate}\n"
+                    f"当前工作目录: {os.getcwd()}"
+                )
+
+        incep_state_dict = torch.load(resolved_path, map_location='cpu')
         block_idx = INCEPTION_V3_FID.BLOCK_INDEX_BY_DIM[2048]
         self.inception_model_fid = INCEPTION_V3_FID(incep_state_dict, [block_idx])
         self.inception_model_fid.cuda()

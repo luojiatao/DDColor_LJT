@@ -1,0 +1,3 @@
+# Training + Basic dependencies
+# This repo keeps training deps in requirements.txt.
+-r requirements.txt
