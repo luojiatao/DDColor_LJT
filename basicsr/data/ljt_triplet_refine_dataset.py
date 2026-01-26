@@ -24,14 +24,29 @@ def _to_tensor(img: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(img).permute(2, 0, 1).contiguous()
 
 
-def _random_crop_same(imgs: list[np.ndarray], crop_size: int) -> list[np.ndarray]:
-    """对多张同尺寸图做一致随机裁剪。"""
+def _random_crop_same(imgs: list[np.ndarray], crop_size: int) -> tuple[list[np.ndarray], int]:
+    """对多张同尺寸图做一致随机裁剪。
+    
+    如果图像的长或宽小于 crop_size，则按图像的较小边裁剪。
+    例如：crop_size=512，原图 418x768 → 裁剪为 418x418
+    
+    返回：(裁剪后的图像列表, 实际裁剪尺寸)
+    """
     h, w = imgs[0].shape[:2]
-    if h < crop_size or w < crop_size:
-        raise ValueError(f"图像尺寸({h},{w})小于crop_size={crop_size}")
-    top = np.random.randint(0, h - crop_size + 1)
-    left = np.random.randint(0, w - crop_size + 1)
-    out = [im[top : top + crop_size, left : left + crop_size, :] for im in imgs]
+    # 实际裁剪尺寸 = min(目标尺寸, 图像较小边)
+    actual_crop = min(crop_size, h, w)
+    top = np.random.randint(0, h - actual_crop + 1)
+    left = np.random.randint(0, w - actual_crop + 1)
+    out = [im[top : top + actual_crop, left : left + actual_crop, :] for im in imgs]
+    return out, actual_crop
+
+
+def _resize_same(imgs: list[np.ndarray], target_size: int) -> list[np.ndarray]:
+    """将多张图 resize 到统一尺寸（正方形）。"""
+    out = []
+    for im in imgs:
+        resized = cv2.resize(im, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+        out.append(resized)
     return out
 
 
@@ -91,9 +106,15 @@ class TripletRefineDataset(data.Dataset):
                     if not line or line.startswith('#'):
                         continue
                     parts = line.split()
-                    if len(parts) < 3:
-                        raise ValueError(f"meta 行格式错误（需要3列路径）: {line}")
-                    b_path, a_path, gt_path = parts[0], parts[1], parts[2]
+                    if len(parts) == 2:
+                        # 两列格式（test 无 GT）：B, A
+                        b_path, a_path = parts[0], parts[1]
+                        gt_path = None  # 无 GT
+                    elif len(parts) >= 3:
+                        # 三列格式：B, A, GT
+                        b_path, a_path, gt_path = parts[0], parts[1], parts[2]
+                    else:
+                        raise ValueError(f"meta 行格式错误（需要2或3列路径）: {line}")
                     self.samples.append((b_path, a_path, gt_path))
 
         if len(self.samples) == 0:
@@ -107,32 +128,62 @@ class TripletRefineDataset(data.Dataset):
 
         b = _imread_rgb(b_path)
         a = _imread_rgb(a_path)
-        gt = _imread_rgb(gt_path)
+        
+        # GT 可能为 None（test 阶段无 GT）
+        if gt_path is not None:
+            gt = _imread_rgb(gt_path)
+        else:
+            gt = None
 
         if self.swap_ab:
             b, a = a, b
             b_path, a_path = a_path, b_path
 
-        # 基本校验：必须同尺寸（否则需要你先做配准/resize）
-        if b.shape[:2] != a.shape[:2] or b.shape[:2] != gt.shape[:2]:
+        # 基本校验：B 和 A 必须同尺寸
+        if b.shape[:2] != a.shape[:2]:
+            raise ValueError(
+                f"B/A 尺寸不一致: B={b.shape[:2]} A={a.shape[:2]}\n"
+                f"B={b_path}\nA={a_path}"
+            )
+        if gt is not None and b.shape[:2] != gt.shape[:2]:
             raise ValueError(
                 f"三元组尺寸不一致: B={b.shape[:2]} A={a.shape[:2]} GT={gt.shape[:2]}\n"
                 f"B={b_path}\nA={a_path}\nGT={gt_path}"
             )
 
-        if self.phase == 'train':
-            if self.gt_size is not None:
-                b, a, gt = _random_crop_same([b, a, gt], int(self.gt_size))
-            b, a, gt = augment([b, a, gt], hflip=self.use_hflip, rotation=self.use_rot)
-        else:
-            # val/test：默认不做随机增强；如需 center crop 可自行加配置
-            pass
+        # 裁剪：train/val/test 都支持，由 gt_size 控制
+        # 裁剪后如果尺寸小于 gt_size，会 resize 到 gt_size 保证 batch 内尺寸一致
+        if self.gt_size is not None:
+            target_size = int(self.gt_size)
+            if gt is not None:
+                [b, a, gt], actual_crop = _random_crop_same([b, a, gt], target_size)
+                if actual_crop < target_size:
+                    b, a, gt = _resize_same([b, a, gt], target_size)
+            else:
+                [b, a], actual_crop = _random_crop_same([b, a], target_size)
+                if actual_crop < target_size:
+                    b, a = _resize_same([b, a], target_size)
 
-        return {
+        # 数据增强：仅 train 阶段
+        if self.phase == 'train':
+            if gt is not None:
+                b, a, gt = augment([b, a, gt], hflip=self.use_hflip, rotation=self.use_rot)
+            else:
+                b, a = augment([b, a], hflip=self.use_hflip, rotation=self.use_rot)
+
+        result = {
             'b': _to_tensor(b),
             'a': _to_tensor(a),
-            'gt': _to_tensor(gt),
             'b_path': b_path,
             'a_path': a_path,
-            'gt_path': gt_path,
         }
+        
+        if gt is not None:
+            result['gt'] = _to_tensor(gt)
+            result['gt_path'] = gt_path
+        else:
+            # 无 GT 时用 A 作为占位（仅用于 feed_data 不报错，不参与 loss 计算）
+            result['gt'] = _to_tensor(a)
+            result['gt_path'] = a_path
+        
+        return result

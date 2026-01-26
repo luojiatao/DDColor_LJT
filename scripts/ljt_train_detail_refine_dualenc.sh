@@ -62,6 +62,7 @@ fi
 source "$ACTIVATE_HELPER" ddcolor
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
 python basicsr/train.py \
   -opt options/train/ljt_train_detail_refine_dualenc.yml \

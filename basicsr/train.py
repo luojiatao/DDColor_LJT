@@ -32,7 +32,7 @@ def init_tb_loggers(opt):
 
 def create_train_val_dataloader(opt, logger):
     # create train and val dataloaders
-    train_loader, val_loaders = None, []
+    train_loader, val_loaders, test_loaders = None, [], []
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train':
             dataset_enlarge_ratio = dataset_opt.get('dataset_enlarge_ratio', 1)
@@ -63,10 +63,17 @@ def create_train_val_dataloader(opt, logger):
                 val_set, dataset_opt, num_gpu=opt['num_gpu'], dist=opt['dist'], sampler=None, seed=opt['manual_seed'])
             logger.info(f'Number of val images/folders in {dataset_opt["name"]}: {len(val_set)}')
             val_loaders.append(val_loader)
+        elif phase.split('_')[0] == 'test':
+            # 测试集：验证后执行，保存结果图
+            test_set = build_dataset(dataset_opt)
+            test_loader = build_dataloader(
+                test_set, dataset_opt, num_gpu=opt['num_gpu'], dist=opt['dist'], sampler=None, seed=opt['manual_seed'])
+            logger.info(f'Number of test images/folders in {dataset_opt["name"]}: {len(test_set)}')
+            test_loaders.append(test_loader)
         else:
             raise ValueError(f'Dataset phase {phase} is not recognized.')
 
-    return train_loader, train_sampler, val_loaders, total_epochs, total_iters
+    return train_loader, train_sampler, val_loaders, test_loaders, total_epochs, total_iters
 
 
 def load_resume_state(opt):
@@ -122,7 +129,7 @@ def train_pipeline(root_path):
 
     # create train and validation dataloaders
     result = create_train_val_dataloader(opt, logger)
-    train_loader, train_sampler, val_loaders, total_epochs, total_iters = result
+    train_loader, train_sampler, val_loaders, test_loaders, total_epochs, total_iters = result
 
     # create model
     model = build_model(opt)
@@ -200,6 +207,9 @@ def train_pipeline(root_path):
                     logger.warning('Multiple validation datasets are *only* supported by SRModel.')
                 for val_loader in val_loaders:
                     model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+                # 验证后执行测试（如果配置了 test dataset）
+                for test_loader in test_loaders:
+                    model.validation(test_loader, current_iter, tb_logger, save_img=True)
 
             data_timer.start()
             iter_timer.start()
@@ -215,6 +225,9 @@ def train_pipeline(root_path):
     if opt.get('val') is not None:
         for val_loader in val_loaders:
             model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+        # 最终测试
+        for test_loader in test_loaders:
+            model.validation(test_loader, current_iter, tb_logger, save_img=True)
     if tb_logger:
         tb_logger.close()
 

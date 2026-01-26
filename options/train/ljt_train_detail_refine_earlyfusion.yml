@@ -16,14 +16,16 @@ datasets:
   train:
     name: TripletTrain
     type: TripletRefineDataset
-    meta_info_file: ["data_list/ljt_detail_refine_train.txt"]
-    gt_size: 512
+    meta_info_file: ["data_list/ljt_detail_refine_train_0123_v1.txt"]
+    # 对齐 ComfyUI 节点语义：交换 A/B 输入顺序
+    swap_ab: true
+    gt_size: 256
     use_hflip: True
     use_rot: False
 
     use_shuffle: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 2
+    batch_size_per_gpu: 8
     pin_memory: True
     persistent_workers: True
     dataset_enlarge_ratio: 1
@@ -32,8 +34,18 @@ datasets:
   val:
     name: TripletVal
     type: TripletRefineDataset
-    meta_info_file: "data_list/ljt_detail_refine_val.txt"
-    gt_size: ~
+    phase: val
+    meta_info_file: "data_list/ljt_detail_refine_val_0123_v1.txt"
+    swap_ab: true
+    gt_size: 256
+
+  test:
+    name: TripletTest
+    type: TripletRefineDataset
+    phase: test
+    meta_info_file: "data_list/ljt_detail_refine_test_0123_v1.txt"
+    swap_ab: true
+    gt_size: 256
 
 # network
 network_g:
@@ -46,7 +58,7 @@ network_g:
   out_channels: 3
   last_norm: Spectral
   encoder_from_pretrain: True
-  input_size: [512, 512]
+  input_size: [256, 256]
   do_imagenet_normalize: True
 
 # 可选：GAN（默认关闭）
@@ -65,7 +77,7 @@ path:
 train:
   optim_g:
     type: AdamW
-    lr: !!float 1e-4
+    lr: !!float 2e-4
     weight_decay: 0.01
     betas: [0.9, 0.99]
 
@@ -77,11 +89,11 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [25000, 40000]
+    milestones: [20000, 35000]
     gamma: 0.5
 
   total_iter: 50000
-  warmup_iter: -1
+  warmup_iter: 1000
 
   # 基础损失：像素 + 感知（建议至少开感知）
   pixel_opt:

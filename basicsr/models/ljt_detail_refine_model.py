@@ -173,7 +173,11 @@ class DetailRefineModel(BaseModel):
 
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         dataset_name = dataloader.dataset.opt['name']
-        with_metrics = self.opt.get('val') is not None and self.opt['val'].get('metrics') is not None
+        dataset_phase = dataloader.dataset.opt.get('phase', 'val')
+        
+        # 测试集（phase='test'）或无 metrics 配置时，跳过 metrics 计算
+        is_test_set = dataset_phase == 'test'
+        with_metrics = (not is_test_set) and self.opt.get('val') is not None and self.opt['val'].get('metrics') is not None
         use_pbar = self.opt.get('val', {}).get('pbar', False)
 
         if with_metrics and not hasattr(self, 'metric_results'):  # only execute in the first run
@@ -193,8 +197,10 @@ class DetailRefineModel(BaseModel):
                 pbar = None
 
         for idx, val_data in enumerate(dataloader):
-            # 取GT文件名作为样本名（稳定且直观）
-            if 'gt_path' in val_data:
+            # 取文件名作为样本名：优先用 b_path（因为 test 集可能无真实 GT）
+            if 'b_path' in val_data:
+                img_name = osp.splitext(osp.basename(val_data['b_path'][0]))[0]
+            elif 'gt_path' in val_data:
                 img_name = osp.splitext(osp.basename(val_data['gt_path'][0]))[0]
             else:
                 img_name = f'{idx:08d}'
@@ -259,29 +265,25 @@ class DetailRefineModel(BaseModel):
                 for metric, value in self.metric_results.items():
                     tb_logger.add_scalar(f'metrics/{dataset_name}/{metric}', value, current_iter)
 
-    def _export_comfy_state_dict(self, current_iter: int):
-        """Export a ComfyUI-friendly weights file.
+    def _export_comfy_state_dict(self, current_iter: int, net_label: str = 'net_g', net=None):
+        """导出 ComfyUI 可直接加载的权重文件（纯 state_dict，无外层包裹）。
 
-        GZY_CJY_DetailColorFuse 节点的历史加载方式通常是：
-        `model.load_state_dict(torch.load(model_path), strict=True)`
+        ComfyUI 节点加载方式：model.load_state_dict(torch.load(model_path), strict=True)
         因此需要：
         - 纯 state_dict（不要外层 {'params': ...} 包裹）
         - 去掉 DDP 的 'module.' 前缀
         - 兼容命名差异：训练端 decoder 可能是 `_token_decoder`/`token_embed`，
           而推理端实现常用 `color_decoder`/`color_embed`
         """
+        if net is None:
+            net = self.net_g
 
-        if current_iter == -1:
-            iter_tag = 'latest'
-        else:
-            iter_tag = str(current_iter)
+        iter_tag = 'latest' if current_iter == -1 else str(current_iter)
+        save_filename = f'{net_label}_{iter_tag}.pth'
+        save_path = osp.join(self.opt['path']['models'], save_filename)
 
-        models_dir = self.opt['path']['models']
-        save_filename = f'net_g_{iter_tag}_comfy.pth'
-        save_path = osp.join(models_dir, save_filename)
-
-        net_g = self.get_bare_model(self.net_g)
-        sd = net_g.state_dict()
+        bare_net = self.get_bare_model(net)
+        sd = bare_net.state_dict()
 
         out = OrderedDict()
         for k, v in sd.items():
@@ -297,20 +299,17 @@ class DetailRefineModel(BaseModel):
 
             out[key] = v.detach().cpu()
 
-        # avoid occasional writing errors
+        # 重试写入（避免偶发 IO 错误）
         retry = 3
         while retry > 0:
             try:
                 torch.save(out, save_path)
+                break
             except Exception as e:
                 logger = get_root_logger()
                 logger.warning(f'[export_comfy] Save model error: {e}, remaining retry times: {retry - 1}')
                 import time as _time
-
                 _time.sleep(1)
-            else:
-                break
-            finally:
                 retry -= 1
         if retry == 0:
             logger = get_root_logger()
@@ -318,9 +317,8 @@ class DetailRefineModel(BaseModel):
 
     @master_only
     def save(self, epoch, current_iter):
-        self.save_network(self.net_g, 'net_g', current_iter)
-        # 额外导出一份 ComfyUI 可直接加载的权重文件
-        self._export_comfy_state_dict(current_iter)
+        # 只保存 ComfyUI 格式权重（纯 state_dict，无外层包裹）
+        self._export_comfy_state_dict(current_iter, 'net_g')
         if self.use_gan:
-            self.save_network(self.net_d, 'net_d', current_iter)
+            self._export_comfy_state_dict(current_iter, 'net_d', net=self.net_d)
         self.save_training_state(epoch, current_iter)
