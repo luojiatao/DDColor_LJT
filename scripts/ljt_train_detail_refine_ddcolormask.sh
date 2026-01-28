@@ -20,10 +20,6 @@ set -euo pipefail
 # 3) Refine（本方案关键点）：末端同时拼 B 与 A：
 #        concat([out_feat(Qch), B(3ch), A(3ch)]) -> 1x1 conv -> 输出 RGB
 #
-# 与 EarlyFusion 基线的差异：
-# - EarlyFusion 基线的 refine 只拼 B（刻意断掉从 A 直接复制褶皱的捷径）。
-# - 本方案的 refine 拼 B+A（更强 late-fusion，效果上限更高，但更可能把 A 的褶皱/低频阴影带回）。
-#
 # ---------------------- 数据与训练要求 ----------------------
 # meta 文件每行三列：
 #   path_to_B  path_to_A  path_to_C(GT)
@@ -31,7 +27,7 @@ set -euo pipefail
 #
 # 运行前请确保：
 # 1) 已准备好 data_list/ljt_detail_refine_train.txt 和 data_list/ljt_detail_refine_val.txt
-# 2) 已准备好预训练 ConvNeXt 权重（见 basicsr/archs/ljt_detail_refine_earlyfusion_arch.py 的默认路径解析逻辑）
+# 2) 已准备好预训练 ConvNeXt 权重（pretrain/convnext_large_22k_224.pth）
 # ==========================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,6 +43,12 @@ source "$ACTIVATE_HELPER" ddcolor
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
+# 生成带时间戳的实验名称，格式：detail_refine_ddcolormask_YYYYMMDD_HHMMSS
+TIMESTAMP=$(date +"%m%d%H")
+EXP_NAME="detail_refine_ddcolormask_${TIMESTAMP}"
+echo "[train] 实验名称: ${EXP_NAME}"
+
 python basicsr/train.py \
   -opt options/train/ljt_train_detail_refine_ddcolormask.yml \
-  --launcher none
+  --launcher none \
+  --force_yml name="${EXP_NAME}"

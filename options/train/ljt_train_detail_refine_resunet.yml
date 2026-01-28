@@ -1,31 +1,40 @@
-# 方案1：单编码器 early-fusion + refine 只拼B（基线）
-# 用法：python basicsr/train.py -opt options/train/ljt_train_detail_refine_earlyfusion.yml
+# ResUnet 细节修复训练配置（轻量级方案）
+# 用法：bash scripts/ljt_train_detail_refine_resunet.sh
 
-name: detail_refine_earlyfusion
-model_type: DetailRefineModel
+name: detail_refine_resunet
+model_type: DetailRefineResUnetModel  # 支持可视化残差和 Mask
 scale: 1
 num_gpu: auto
 manual_seed: 0
 
-# datasets
-# 你需要先准备一个 meta 文件，每行三列：
-#   path_to_B  path_to_A  path_to_C
-# 其中：B=无褶皱但模糊（结构图），A=有褶皱清晰（参考图），C=无褶皱清晰（GT）
+# ==================== 数据集配置 ====================
+# meta 文件格式：每行三列 "B路径 A路径 GT路径"
+#   B = 结构图（无褶皱但模糊）
+#   A = 参考图（有褶皱但清晰）
+#   GT = 目标（无褶皱且清晰）
 
 datasets:
   train:
     name: TripletTrain
     type: TripletRefineDataset
-    meta_info_file: ["data_list/ljt_detail_refine_train_0123_v1.txt"]
+    meta_info_file: ["data_list/ljt_detail_refine_train_0127_v2.txt"]
     # 对齐 ComfyUI 节点语义：交换 A/B 输入顺序
     swap_ab: true
     gt_size: 256
     use_hflip: True
     use_rot: False
 
+    # 随机模糊增强：增加训练样本多样性
+    use_blur_aug: false               # 关闭模糊增强
+    blur_aug_probs: [1, 1, 1]         # 权重 [无处理, 下采样模糊, 高斯模糊]
+    blur_aug_target: 'b'              # 目标：'b'/'a'/'both'
+    downsample_scale: 2.0             # 下采样倍数（256→128→256）
+    gaussian_radius: 2                # 高斯核半径（核大小=5）
+    gaussian_iterations: 1            # 高斯迭代次数
+
     use_shuffle: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
+    batch_size_per_gpu: 24            # ResUnet 更轻量，可以用更大 batch
     pin_memory: True
     persistent_workers: True
     dataset_enlarge_ratio: 1
@@ -35,7 +44,7 @@ datasets:
     name: TripletVal
     type: TripletRefineDataset
     phase: val
-    meta_info_file: "data_list/ljt_detail_refine_val_0123_v1.txt"
+    meta_info_file: "data_list/ljt_detail_refine_val_0127_v2.txt"
     swap_ab: true
     gt_size: 256
 
@@ -43,29 +52,17 @@ datasets:
     name: TripletTest
     type: TripletRefineDataset
     phase: test
-    meta_info_file: "data_list/ljt_detail_refine_test_0123_v1.txt"
+    meta_info_file: "data_list/ljt_detail_refine_test_0127_v2.txt"
     swap_ab: true
     gt_size: 256
 
 # network
 network_g:
-  type: DetailRefineEarlyFusion
-  encoder_name: convnext-l
-  num_queries: 256
-  num_scales: 3
-  dec_layers: 9
-  nf: 512
+  type: DetailRefineResUnet
   out_channels: 3
-  last_norm: Spectral
-  encoder_from_pretrain: True
+  output_mode: residual_and_mask      # 残差+Mask 模式，支持可视化调试
   input_size: [256, 256]
-  do_imagenet_normalize: True
-
-# 可选：GAN（默认关闭）
-# network_d:
-#   type: DynamicUNetDiscriminator
-#   nf: 64
-#   n_channels: 3
+  pretrained_backbone: True
 
 # path
 path:
@@ -81,21 +78,14 @@ train:
     weight_decay: 0.01
     betas: [0.9, 0.99]
 
-  # optim_d:  # 若开启 network_d/gan_opt 才需要
-  #   type: Adam
-  #   lr: !!float 1e-4
-  #   weight_decay: 0
-  #   betas: [0.9, 0.99]
-
   scheduler:
     type: MultiStepLR
-    milestones: [20000, 35000]
+    milestones: [40000, 70000]
     gamma: 0.5
 
-  total_iter: 50000
-  warmup_iter: 1000
+  total_iter: 100000
+  warmup_iter: 2000
 
-  # 基础损失：像素 + 感知（建议至少开感知）
   pixel_opt:
     type: L1Loss
     loss_weight: 1.0
@@ -115,11 +105,9 @@ train:
     perceptual_weight: 1.0
     style_weight: 0
 
-  # gan_opt: ~
-
 # validation
 val:
-  val_freq: 5000
+  val_freq: 10000
   save_img: true
   metrics:
     psnr:
@@ -131,7 +119,7 @@ val:
 logger:
   print_freq: 100
   save_snapshot_freq: ~
-  save_checkpoint_freq: 5000
+  save_checkpoint_freq: 10000
   use_tb_logger: true
 
 # misc

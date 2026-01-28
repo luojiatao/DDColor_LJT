@@ -19,6 +19,40 @@ def _imread_rgb(path: str) -> np.ndarray:
     return img.astype(np.float32) / 255.0
 
 
+def _apply_downsample_upsample_blur(img: np.ndarray, scale: float) -> np.ndarray:
+    """下采样-上采样模糊：先按比例缩小再放大回原尺寸。
+    
+    scale: 缩放倍数，例如 2.0 表示先缩小到 1/2 再放大回原尺寸
+    """
+    if scale <= 1.0:
+        return img
+    h, w = img.shape[:2]
+    new_h, new_w = int(h / scale), int(w / scale)
+    # 确保尺寸至少为1
+    new_h = max(1, new_h)
+    new_w = max(1, new_w)
+    # 下采样
+    down = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    # 上采样回原尺寸
+    up = cv2.resize(down, (w, h), interpolation=cv2.INTER_LINEAR)
+    return up
+
+
+def _apply_gaussian_blur(img: np.ndarray, radius: int, iterations: int = 1) -> np.ndarray:
+    """高斯模糊：指定半径和迭代次数。
+    
+    radius: 模糊核半径，实际核大小为 2*radius+1
+    iterations: 迭代次数，多次应用可增强模糊效果
+    """
+    if radius <= 0 or iterations <= 0:
+        return img
+    ksize = 2 * radius + 1
+    result = img
+    for _ in range(iterations):
+        result = cv2.GaussianBlur(result, (ksize, ksize), 0)
+    return result
+
+
 def _to_tensor(img: np.ndarray) -> torch.Tensor:
     """HWC RGB [0,1] -> CHW tensor [0,1]"""
     return torch.from_numpy(img).permute(2, 0, 1).contiguous()
@@ -86,6 +120,20 @@ class TripletRefineDataset(data.Dataset):
         self.use_hflip = opt.get('use_hflip', True)
         self.use_rot = opt.get('use_rot', False)
 
+        # ========== 模糊数据增强配置（随机选择模式） ==========
+        # 总开关：是否启用模糊增强
+        self.use_blur_aug = opt.get('use_blur_aug', False)
+        # 各增强方式的概率权重 [不做处理, 下采样模糊, 高斯模糊]
+        self.blur_aug_probs = opt.get('blur_aug_probs', [0.3, 0.35, 0.35])
+        self.blur_aug_target = opt.get('blur_aug_target', 'b')  # 应用目标：'b', 'a', 'both'
+        
+        # 下采样-上采样模糊参数
+        self.downsample_scale = opt.get('downsample_scale', 2.0)  # 缩放倍数，2.0=缩小到1/2再放大
+        
+        # 高斯模糊参数
+        self.gaussian_radius = opt.get('gaussian_radius', 3)  # 核半径，实际核大小=2*radius+1
+        self.gaussian_iterations = opt.get('gaussian_iterations', 1)  # 迭代次数
+
         meta = opt.get('meta_info_file')
         if meta is None:
             raise ValueError("TripletRefineDataset 需要在 yaml 中提供 meta_info_file")
@@ -128,62 +176,59 @@ class TripletRefineDataset(data.Dataset):
 
         b = _imread_rgb(b_path)
         a = _imread_rgb(a_path)
-        
-        # GT 可能为 None（test 阶段无 GT）
-        if gt_path is not None:
-            gt = _imread_rgb(gt_path)
-        else:
-            gt = None
+        gt = _imread_rgb(gt_path) if gt_path else None
+        has_gt = gt is not None
 
         if self.swap_ab:
             b, a = a, b
             b_path, a_path = a_path, b_path
 
-        # 基本校验：B 和 A 必须同尺寸
+        # 尺寸校验
         if b.shape[:2] != a.shape[:2]:
-            raise ValueError(
-                f"B/A 尺寸不一致: B={b.shape[:2]} A={a.shape[:2]}\n"
-                f"B={b_path}\nA={a_path}"
-            )
-        if gt is not None and b.shape[:2] != gt.shape[:2]:
-            raise ValueError(
-                f"三元组尺寸不一致: B={b.shape[:2]} A={a.shape[:2]} GT={gt.shape[:2]}\n"
-                f"B={b_path}\nA={a_path}\nGT={gt_path}"
-            )
+            raise ValueError(f"B/A 尺寸不一致: B={b.shape[:2]} A={a.shape[:2]}")
+        if has_gt and b.shape[:2] != gt.shape[:2]:
+            raise ValueError(f"B/GT 尺寸不一致: B={b.shape[:2]} GT={gt.shape[:2]}")
 
-        # 裁剪：train/val/test 都支持，由 gt_size 控制
-        # 裁剪后如果尺寸小于 gt_size，会 resize 到 gt_size 保证 batch 内尺寸一致
+        # 统一处理图像列表，简化后续分支
+        imgs = [b, a, gt] if has_gt else [b, a]
+
+        # 裁剪：gt_size 控制目标尺寸，小于目标则 resize 补齐
         if self.gt_size is not None:
             target_size = int(self.gt_size)
-            if gt is not None:
-                [b, a, gt], actual_crop = _random_crop_same([b, a, gt], target_size)
-                if actual_crop < target_size:
-                    b, a, gt = _resize_same([b, a, gt], target_size)
-            else:
-                [b, a], actual_crop = _random_crop_same([b, a], target_size)
-                if actual_crop < target_size:
-                    b, a = _resize_same([b, a], target_size)
+            imgs, actual_crop = _random_crop_same(imgs, target_size)
+            if actual_crop < target_size:
+                imgs = _resize_same(imgs, target_size)
 
         # 数据增强：仅 train 阶段
         if self.phase == 'train':
-            if gt is not None:
-                b, a, gt = augment([b, a, gt], hflip=self.use_hflip, rotation=self.use_rot)
-            else:
-                b, a = augment([b, a], hflip=self.use_hflip, rotation=self.use_rot)
+            imgs = augment(imgs, hflip=self.use_hflip, rotation=self.use_rot)
+            
+            # 随机模糊增强：0=无, 1=下采样模糊, 2=高斯模糊
+            if self.use_blur_aug:
+                probs = np.array(self.blur_aug_probs, dtype=np.float32)
+                probs = probs / probs.sum()
+                aug_choice = np.random.choice([0, 1, 2], p=probs)
+                
+                # 根据 blur_aug_target 确定要处理的索引
+                targets = {'b': [0], 'a': [1], 'both': [0, 1]}
+                target_indices = targets.get(self.blur_aug_target, [0])
+                
+                if aug_choice == 1 and self.downsample_scale > 1.0:
+                    for i in target_indices:
+                        imgs[i] = _apply_downsample_upsample_blur(imgs[i], self.downsample_scale)
+                elif aug_choice == 2 and self.gaussian_radius > 0:
+                    for i in target_indices:
+                        imgs[i] = _apply_gaussian_blur(imgs[i], self.gaussian_radius, self.gaussian_iterations)
 
-        result = {
+        # 解包结果
+        b, a = imgs[0], imgs[1]
+        gt = imgs[2] if has_gt else a  # 无 GT 时用 A 作占位
+
+        return {
             'b': _to_tensor(b),
             'a': _to_tensor(a),
+            'gt': _to_tensor(gt),
             'b_path': b_path,
             'a_path': a_path,
+            'gt_path': gt_path if has_gt else a_path,
         }
-        
-        if gt is not None:
-            result['gt'] = _to_tensor(gt)
-            result['gt_path'] = gt_path
-        else:
-            # 无 GT 时用 A 作为占位（仅用于 feed_data 不报错，不参与 loss 计算）
-            result['gt'] = _to_tensor(a)
-            result['gt_path'] = a_path
-        
-        return result

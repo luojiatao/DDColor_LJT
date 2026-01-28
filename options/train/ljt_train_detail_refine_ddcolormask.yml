@@ -1,5 +1,5 @@
-# 方案DDColorMask复现：Early-Fusion + refine 同时拼 B 与 A（更接近 ddcolormask_arch_cjy_detail_transfer.py）
-# 用法：python basicsr/train.py -opt options/train/ljt_train_detail_refine_ddcolormask.yml
+# DDColorMask 细节修复训练配置
+# 用法：bash scripts/ljt_train_detail_refine_ddcolormask.sh
 
 name: detail_refine_ddcolormask
 model_type: DetailRefineModel
@@ -7,30 +7,34 @@ scale: 1
 num_gpu: auto
 manual_seed: 0
 
-# datasets
-# 你需要先准备一个 meta 文件，每行三列：
-#   path_to_B  path_to_A  path_to_C
-# 其中：
-#   B=结构/内容图（例如：无褶皱但模糊）
-#   A=参考/细节图（例如：清晰但有褶皱）
-#   C=目标真值（例如：无褶皱且清晰）
-#
-# 注意：三张图必须同尺寸；训练会对三者做一致 crop/flip/rotate。
+# ==================== 数据集配置 ====================
+# meta 文件格式：每行三列 "B路径 A路径 GT路径"
+#   B = 结构图（无褶皱但模糊）
+#   A = 参考图（有褶皱但清晰）
+#   GT = 目标（无褶皱且清晰）
 
 datasets:
   train:
     name: TripletTrain
     type: TripletRefineDataset
-    meta_info_file: ["data_list/ljt_detail_refine_train_0123_v1.txt"]
+    meta_info_file: ["data_list/ljt_detail_refine_train_0127_v2.txt"]
     # 对齐 ComfyUI 节点语义：交换 A/B 输入顺序
     swap_ab: true
     gt_size: 256
     use_hflip: True
     use_rot: False
 
+    # 随机模糊增强：增加训练样本多样性
+    use_blur_aug: true                # 总开关
+    blur_aug_probs: [1, 1, 1]         # 权重 [无处理, 下采样模糊, 高斯模糊]
+    blur_aug_target: 'b'              # 目标：'b'/'a'/'both'
+    downsample_scale: 2.0             # 下采样倍数（256→128→256）
+    gaussian_radius: 2                # 高斯核半径（核大小=5）
+    gaussian_iterations: 1            # 高斯迭代次数
+
     use_shuffle: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
+    batch_size_per_gpu: 12
     pin_memory: True
     persistent_workers: True
     dataset_enlarge_ratio: 1
@@ -40,7 +44,7 @@ datasets:
     name: TripletVal
     type: TripletRefineDataset
     phase: val
-    meta_info_file: "data_list/ljt_detail_refine_val_0123_v1.txt"
+    meta_info_file: "data_list/ljt_detail_refine_val_0127_v2.txt"
     swap_ab: true
     gt_size: 256
 
@@ -48,7 +52,7 @@ datasets:
     name: TripletTest
     type: TripletRefineDataset
     phase: test
-    meta_info_file: "data_list/ljt_detail_refine_test_0123_v1.txt"
+    meta_info_file: "data_list/ljt_detail_refine_test_0127_v2.txt"
     swap_ab: true
     gt_size: 256
 
@@ -82,11 +86,11 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [20000, 35000]
+    milestones: [40000, 70000]
     gamma: 0.5
 
-  total_iter: 50000
-  warmup_iter: 1000
+  total_iter: 100000
+  warmup_iter: 2000
 
   pixel_opt:
     type: L1Loss
@@ -109,7 +113,7 @@ train:
 
 # validation
 val:
-  val_freq: 5000
+  val_freq: 10000
   save_img: true
   metrics:
     psnr:
@@ -121,7 +125,7 @@ val:
 logger:
   print_freq: 100
   save_snapshot_freq: ~
-  save_checkpoint_freq: 5000
+  save_checkpoint_freq: 10000
   use_tb_logger: true
 
 # misc
